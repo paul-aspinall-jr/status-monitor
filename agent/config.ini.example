@@ -1,0 +1,14 @@
+# Status Agent Configuration
+# Copy this file to config.ini and fill in the values.
+
+# The URL of your Cloudflare Worker status endpoint
+endpoint = https://status-monitor.your-subdomain.workers.dev/api/status
+
+# API key (must match the API_KEY in your wrangler.toml)
+api_key = change-me-to-a-secret-key
+
+# How often to send metrics (in seconds)
+interval = 60
+
+# Override the hostname (optional, defaults to system hostname)
+# hostname = my-server-01

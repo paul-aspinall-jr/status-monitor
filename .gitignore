@@ -1,0 +1,7 @@
+agent/zig-out/
+agent/.zig-cache/
+worker/node_modules/
+worker/.wrangler/
+config.ini
+.env
+*.pdb
