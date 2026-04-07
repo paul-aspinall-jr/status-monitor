@@ -6,10 +6,13 @@ export default {
       return handleStatusPost(request, env);
     }
     if (url.pathname === "/api/status" && request.method === "GET") {
-      return handleStatusGet(env);
+      return handleStatusGet(url, env);
     }
     if (url.pathname === "/api/status" && request.method === "DELETE") {
       return handleStatusDelete(request, env);
+    }
+    if (url.pathname === "/api/history" && request.method === "GET") {
+      return handleHistoryGet(url, env);
     }
     if (url.pathname === "/") {
       return handleDashboard(env);
@@ -38,38 +41,60 @@ async function handleStatusPost(request, env) {
     return jsonResponse({ error: "hostname is required" }, 400);
   }
 
-  const record = {
-    hostname: body.hostname,
-    os: body.os || "unknown",
-    cpu_usage: body.cpu_usage ?? null,
-    memory_total: body.memory_total ?? null,
-    memory_used: body.memory_used ?? null,
-    disk_total: body.disk_total ?? null,
-    disk_used: body.disk_used ?? null,
-    uptime_seconds: body.uptime_seconds ?? null,
-    custom: body.custom || {},
-    last_seen: new Date().toISOString(),
-  };
+  const now = new Date().toISOString();
 
-  // Store with 5-minute TTL so stale entries auto-expire
-  await env.STATUS_KV.put(`server:${body.hostname}`, JSON.stringify(record), {
-    expirationTtl: 300,
-  });
+  // Upsert current status
+  await env.DB.prepare(`
+    INSERT INTO status (hostname, os, cpu_usage, memory_total, memory_used, disk_total, disk_used, uptime_seconds, last_seen)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(hostname) DO UPDATE SET
+      os = excluded.os,
+      cpu_usage = excluded.cpu_usage,
+      memory_total = excluded.memory_total,
+      memory_used = excluded.memory_used,
+      disk_total = excluded.disk_total,
+      disk_used = excluded.disk_used,
+      uptime_seconds = excluded.uptime_seconds,
+      last_seen = excluded.last_seen
+  `).bind(
+    body.hostname,
+    body.os || "unknown",
+    body.cpu_usage ?? null,
+    body.memory_total ?? null,
+    body.memory_used ?? null,
+    body.disk_total ?? null,
+    body.disk_used ?? null,
+    body.uptime_seconds ?? null,
+    now,
+  ).run();
 
-  // Also maintain a set of known hostnames (longer TTL)
-  const hostsRaw = await env.STATUS_KV.get("hosts:index");
-  const hosts = hostsRaw ? JSON.parse(hostsRaw) : [];
-  if (!hosts.includes(body.hostname)) {
-    hosts.push(body.hostname);
-    await env.STATUS_KV.put("hosts:index", JSON.stringify(hosts));
-  }
+  // Record history
+  await env.DB.prepare(`
+    INSERT INTO status_history (hostname, cpu_usage, memory_total, memory_used, disk_total, disk_used, uptime_seconds, recorded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(
+    body.hostname,
+    body.cpu_usage ?? null,
+    body.memory_total ?? null,
+    body.memory_used ?? null,
+    body.disk_total ?? null,
+    body.disk_used ?? null,
+    body.uptime_seconds ?? null,
+    now,
+  ).run();
 
   return jsonResponse({ ok: true, hostname: body.hostname });
 }
 
-async function handleStatusGet(env) {
-  const servers = await getAllServers(env);
-  return jsonResponse(servers);
+async function handleStatusGet(url, env) {
+  const hostname = url.searchParams.get("hostname");
+  if (hostname) {
+    const row = await env.DB.prepare("SELECT * FROM status WHERE hostname = ?").bind(hostname).first();
+    if (!row) return jsonResponse({ error: "Not found" }, 404);
+    return jsonResponse(row);
+  }
+  const { results } = await env.DB.prepare("SELECT * FROM status ORDER BY hostname").all();
+  return jsonResponse(results);
 }
 
 async function handleStatusDelete(request, env) {
@@ -84,33 +109,29 @@ async function handleStatusDelete(request, env) {
     return jsonResponse({ error: "hostname query param required" }, 400);
   }
 
-  await env.STATUS_KV.delete(`server:${hostname}`);
-
-  const hostsRaw = await env.STATUS_KV.get("hosts:index");
-  if (hostsRaw) {
-    const hosts = JSON.parse(hostsRaw).filter((h) => h !== hostname);
-    await env.STATUS_KV.put("hosts:index", JSON.stringify(hosts));
-  }
+  await env.DB.batch([
+    env.DB.prepare("DELETE FROM status WHERE hostname = ?").bind(hostname),
+    env.DB.prepare("DELETE FROM status_history WHERE hostname = ?").bind(hostname),
+  ]);
 
   return jsonResponse({ ok: true, deleted: hostname });
 }
 
-// --- Helpers ---
-
-async function getAllServers(env) {
-  const hostsRaw = await env.STATUS_KV.get("hosts:index");
-  const hosts = hostsRaw ? JSON.parse(hostsRaw) : [];
-  const servers = [];
-
-  for (const hostname of hosts) {
-    const raw = await env.STATUS_KV.get(`server:${hostname}`);
-    if (raw) {
-      servers.push(JSON.parse(raw));
-    }
+async function handleHistoryGet(url, env) {
+  const hostname = url.searchParams.get("hostname");
+  if (!hostname) {
+    return jsonResponse({ error: "hostname query param required" }, 400);
   }
+  const limit = Math.min(parseInt(url.searchParams.get("limit") || "60", 10), 1440);
 
-  return servers;
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM status_history WHERE hostname = ? ORDER BY recorded_at DESC LIMIT ?"
+  ).bind(hostname, limit).all();
+
+  return jsonResponse(results);
 }
+
+// --- Helpers ---
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -125,7 +146,7 @@ function jsonResponse(data, status = 200) {
 // --- Dashboard ---
 
 async function handleDashboard(env) {
-  const servers = await getAllServers(env);
+  const { results: servers } = await env.DB.prepare("SELECT * FROM status ORDER BY hostname").all();
   const html = renderDashboard(servers);
   return new Response(html, {
     headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -137,7 +158,7 @@ function renderDashboard(servers) {
     .map((s) => {
       const lastSeen = new Date(s.last_seen);
       const ageMs = Date.now() - lastSeen.getTime();
-      const isOnline = ageMs < 120_000; // seen within 2 minutes
+      const isOnline = ageMs < 120_000;
       const status = isOnline ? "online" : "stale";
       const dot = isOnline ? "🟢" : "🟡";
 

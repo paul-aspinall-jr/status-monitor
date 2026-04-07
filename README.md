@@ -2,7 +2,7 @@
 
 A lightweight server status monitoring system with two components:
 
-- **worker/** — Cloudflare Worker that receives status pings, stores them in KV, and serves a live dashboard
+- **worker/** — Cloudflare Worker that receives status pings, stores them in D1 (SQLite), and serves a live dashboard
 - **agent/** — Zig binary that collects system metrics and POSTs them to the worker (cross-compiles to Linux and Windows)
 
 ## Architecture
@@ -10,7 +10,7 @@ A lightweight server status monitoring system with two components:
 ```
 ┌──────────────┐        POST /api/status        ┌─────────────────────┐
 │  status-agent│  ──────────────────────────►    │  Cloudflare Worker  │
-│  (Linux/Win) │    hostname, cpu, mem, disk     │  + KV Store         │
+│  (Linux/Win) │    hostname, cpu, mem, disk     │  + D1 Database      │
 └──────────────┘                                 └────────┬────────────┘
                                                           │
                                                    GET /  │
@@ -29,9 +29,12 @@ A lightweight server status monitoring system with two components:
 cd worker
 npm install
 
-# Create the KV namespace
-npx wrangler kv namespace create STATUS_KV
-# Copy the printed ID into wrangler.toml
+# Create the D1 database
+npx wrangler d1 create status-monitor-db
+# Copy the printed database_id into wrangler.toml
+
+# Apply the schema
+npx wrangler d1 execute status-monitor-db --remote --file=schema.sql
 
 # Set your API key
 npx wrangler secret put API_KEY
@@ -84,7 +87,9 @@ interval = 60
 |--------|------|------|-------------|
 | `POST` | `/api/status` | `X-API-Key` | Submit server metrics |
 | `GET` | `/api/status` | — | Get all servers (JSON) |
-| `DELETE` | `/api/status?hostname=X` | `X-API-Key` | Remove a server |
+| `GET` | `/api/status?hostname=X` | — | Get single server (JSON) |
+| `GET` | `/api/history?hostname=X` | — | Get metric history (JSON) |
+| `DELETE` | `/api/status?hostname=X` | `X-API-Key` | Remove a server and its history |
 | `GET` | `/` | — | Live HTML dashboard |
 
 ### POST payload
@@ -101,8 +106,6 @@ interval = 60
   "uptime_seconds": 864000
 }
 ```
-
-KV entries expire after 5 minutes, so servers that stop reporting automatically disappear from the dashboard.
 
 ## Build Commands
 
