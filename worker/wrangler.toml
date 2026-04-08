@@ -5,7 +5,7 @@ compatibility_date = "2024-12-01"
 # API_KEY and SMTP2GO_API_KEY are set via `npx wrangler secret put <NAME>`
 
 [vars]
-ALERT_EMAILS = "system.user@jackross.co.uk"
+ALERT_EMAILS = "system.user@jackross.co.uk,umar@jackross.co.uk"
 
 [triggers]
 crons = ["*/2 * * * *"]
