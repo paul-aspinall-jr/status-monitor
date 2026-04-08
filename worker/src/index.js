@@ -1,6 +1,5 @@
 const DOWNTIME_THRESHOLD_S = 120; // gap > 2 minutes = downtime
 
-const ALERT_EMAIL = "system.user@jackross.co.uk";
 const ALERT_FROM = "system.user@jackross.co.uk";
 
 export default {
@@ -270,7 +269,7 @@ async function sendAlertEmail(env, hostname, lastSeen, downForSeconds) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         api_key: env.SMTP2GO_API_KEY,
-        to: [ALERT_EMAIL],
+        to: env.ALERT_EMAILS.split(",").map(e => e.trim()).filter(Boolean),
         sender: ALERT_FROM,
         subject,
         text_body: body,
