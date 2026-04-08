@@ -1,13 +1,11 @@
-name = "status-monitor"
+name = "status"
 main = "src/index.js"
 compatibility_date = "2024-12-01"
 
-[vars]
-API_KEY = "change-me-to-a-secret-key"
+# API_KEY is set via `npx wrangler secret put API_KEY` — do not put it here
 
 [[d1_databases]]
-binding = "DB"
+binding = "status_monitor_db"
 database_name = "status-monitor-db"
-database_id = "PLACEHOLDER_DB_ID"
-# After creating the D1 database with `npx wrangler d1 create status-monitor-db`,
-# replace PLACEHOLDER_DB_ID with the actual ID.
+database_id = "d7efaaa1-02fa-4db6-9261-4a2831576d19"
+
