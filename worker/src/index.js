@@ -19,10 +19,7 @@ export default {
     if (url.pathname === "/api/status" && request.method === "DELETE") {
       return handleStatusDelete(request, env);
     }
-    if (url.pathname === "/api/history" && request.method === "GET") {
-      return handleHistoryGet(url, env);
-    }
-    if (url.pathname === "/api/uptime" && request.method === "GET") {
+if (url.pathname === "/api/uptime" && request.method === "GET") {
       return handleUptimeGet(url, env);
     }
     if (url.pathname === "/") {
@@ -78,21 +75,6 @@ async function handleStatusPost(request, env) {
   `).bind(
     body.hostname,
     body.os || "unknown",
-    body.cpu_usage ?? null,
-    body.memory_total ?? null,
-    body.memory_used ?? null,
-    body.disk_total ?? null,
-    body.disk_used ?? null,
-    body.uptime_seconds ?? null,
-    nowISO,
-  ).run();
-
-  // Record history
-  await env.status_monitor_db.prepare(`
-    INSERT INTO status_history (hostname, cpu_usage, memory_total, memory_used, disk_total, disk_used, uptime_seconds, recorded_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).bind(
-    body.hostname,
     body.cpu_usage ?? null,
     body.memory_total ?? null,
     body.memory_used ?? null,
@@ -178,25 +160,10 @@ async function handleStatusDelete(request, env) {
 
   await env.status_monitor_db.batch([
     env.status_monitor_db.prepare("DELETE FROM status WHERE hostname = ?").bind(hostname),
-    env.status_monitor_db.prepare("DELETE FROM status_history WHERE hostname = ?").bind(hostname),
     env.status_monitor_db.prepare("DELETE FROM daily_uptime WHERE hostname = ?").bind(hostname),
   ]);
 
   return jsonResponse({ ok: true, deleted: hostname });
-}
-
-async function handleHistoryGet(url, env) {
-  const hostname = url.searchParams.get("hostname");
-  if (!hostname) {
-    return jsonResponse({ error: "hostname query param required" }, 400);
-  }
-  const limit = Math.min(parseInt(url.searchParams.get("limit") || "60", 10), 1440);
-
-  const { results } = await env.status_monitor_db.prepare(
-    "SELECT * FROM status_history WHERE hostname = ? ORDER BY recorded_at DESC LIMIT ?"
-  ).bind(hostname, limit).all();
-
-  return jsonResponse(results);
 }
 
 async function handleUptimeGet(url, env) {
