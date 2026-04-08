@@ -345,30 +345,64 @@ function renderDashboard(servers, uptimeByHost) {
   <title>Status Monitor</title>
   <meta http-equiv="refresh" content="30">
   <style>
+    :root {
+      --bg: #0d1117;
+      --text: #c9d1d9;
+      --heading: #f0f6fc;
+      --muted: #8b949e;
+      --card-bg: #161b22;
+      --card-border: #30363d;
+      --chart-label: #484f58;
+      --no-data: #21262d;
+      --green: #3fb950;
+      --yellow: #d29922;
+      --red: #f85149;
+      --green-glow: rgba(63,185,80,0.4);
+      --yellow-glow: rgba(210,153,34,0.4);
+      --red-glow: rgba(248,81,73,0.4);
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #ffffff;
+        --text: #1f2328;
+        --heading: #1f2328;
+        --muted: #656d76;
+        --card-bg: #f6f8fa;
+        --card-border: #d0d7de;
+        --chart-label: #8b949e;
+        --no-data: #eaeef2;
+        --green: #1a7f37;
+        --yellow: #9a6700;
+        --red: #cf222e;
+        --green-glow: rgba(26,127,55,0.3);
+        --yellow-glow: rgba(154,103,0,0.3);
+        --red-glow: rgba(207,34,46,0.3);
+      }
+    }
     *, *::before, *::after { box-sizing: border-box; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: #0d1117; color: #c9d1d9; margin: 0; padding: 0;
+      background: var(--bg); color: var(--text); margin: 0; padding: 0;
     }
     .container { max-width: 1000px; margin: 0 auto; padding: 2rem 1.5rem; }
-    h1 { color: #f0f6fc; font-size: 1.6rem; margin: 0 0 0.25rem 0; font-weight: 600; }
-    .subtitle { color: #8b949e; font-size: 0.9rem; margin-bottom: 2rem; }
+    h1 { color: var(--heading); font-size: 1.6rem; margin: 0 0 0.25rem 0; font-weight: 600; }
+    .subtitle { color: var(--muted); font-size: 0.9rem; margin-bottom: 2rem; }
 
     .overall-status {
-      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px;
       padding: 1.25rem 1.5rem; margin-bottom: 2rem; display: flex;
       align-items: center; gap: 0.75rem;
     }
     .overall-dot {
       width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
     }
-    .overall-dot.green { background: #3fb950; box-shadow: 0 0 8px rgba(63,185,80,0.4); }
-    .overall-dot.yellow { background: #d29922; box-shadow: 0 0 8px rgba(210,153,34,0.4); }
-    .overall-dot.red { background: #f85149; box-shadow: 0 0 8px rgba(248,81,73,0.4); }
+    .overall-dot.green { background: var(--green); box-shadow: 0 0 8px var(--green-glow); }
+    .overall-dot.yellow { background: var(--yellow); box-shadow: 0 0 8px var(--yellow-glow); }
+    .overall-dot.red { background: var(--red); box-shadow: 0 0 8px var(--red-glow); }
     .overall-text { font-size: 1.1rem; font-weight: 500; }
 
     .server-section {
-      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px;
       padding: 1.25rem 1.5rem; margin-bottom: 1rem;
     }
     .server-header {
@@ -379,10 +413,10 @@ function renderDashboard(servers, uptimeByHost) {
     .status-dot {
       width: 10px; height: 10px; border-radius: 50%; display: inline-block;
     }
-    .status-dot.green { background: #3fb950; }
-    .status-dot.red { background: #f85149; }
-    .status-label { color: #8b949e; font-weight: 400; font-size: 0.85rem; margin-left: 0.5rem; }
-    .uptime-pct { color: #8b949e; font-size: 0.9rem; }
+    .status-dot.green { background: var(--green); }
+    .status-dot.red { background: var(--red); }
+    .status-label { color: var(--muted); font-weight: 400; font-size: 0.85rem; margin-left: 0.5rem; }
+    .uptime-pct { color: var(--muted); font-size: 0.9rem; }
 
     .uptime-chart {
       display: flex; gap: 2px; height: 34px; align-items: flex-end;
@@ -394,34 +428,34 @@ function renderDashboard(servers, uptimeByHost) {
     .bar-fill {
       width: 100%; border-radius: 2px; transition: height 0.2s;
     }
-    .bar.good .bar-fill { background: #3fb950; }
-    .bar.degraded .bar-fill { background: #d29922; }
-    .bar.down .bar-fill { background: #f85149; }
-    .bar.no-data .bar-fill { background: #21262d; }
+    .bar.good .bar-fill { background: var(--green); }
+    .bar.degraded .bar-fill { background: var(--yellow); }
+    .bar.down .bar-fill { background: var(--red); }
+    .bar.no-data .bar-fill { background: var(--no-data); }
     .bar:hover { opacity: 0.8; }
 
     .chart-labels {
       display: flex; justify-content: space-between;
-      font-size: 0.75rem; color: #484f58; margin-top: 0.35rem;
+      font-size: 0.75rem; color: var(--chart-label); margin-top: 0.35rem;
     }
 
     .empty {
-      color: #8b949e; text-align: center; padding: 3rem;
-      background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+      color: var(--muted); text-align: center; padding: 3rem;
+      background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px;
     }
 
     .legend {
       display: flex; gap: 1.5rem; margin-bottom: 1.5rem;
-      font-size: 0.8rem; color: #8b949e;
+      font-size: 0.8rem; color: var(--muted);
     }
     .legend-item { display: flex; align-items: center; gap: 0.4rem; }
     .legend-swatch {
       width: 12px; height: 12px; border-radius: 2px;
     }
-    .legend-swatch.good { background: #3fb950; }
-    .legend-swatch.degraded { background: #d29922; }
-    .legend-swatch.down { background: #f85149; }
-    .legend-swatch.no-data { background: #21262d; }
+    .legend-swatch.good { background: var(--green); }
+    .legend-swatch.degraded { background: var(--yellow); }
+    .legend-swatch.down { background: var(--red); }
+    .legend-swatch.no-data { background: var(--no-data); }
   </style>
 </head>
 <body>
