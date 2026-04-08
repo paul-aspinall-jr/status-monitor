@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS status (
     disk_total INTEGER,
     disk_used INTEGER,
     uptime_seconds INTEGER,
-    last_seen TEXT NOT NULL
+    last_seen TEXT NOT NULL,
+    alert_sent INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS status_history (

@@ -1,6 +1,13 @@
 const DOWNTIME_THRESHOLD_S = 120; // gap > 2 minutes = downtime
 
+const ALERT_EMAIL = "system.user@jackross.co.uk";
+const ALERT_FROM = "system.user@jackross.co.uk";
+
 export default {
+  async scheduled(event, env, ctx) {
+    await checkAndAlert(env);
+  },
+
   async fetch(request, env) {
     const url = new URL(request.url);
 
@@ -55,10 +62,10 @@ async function handleStatusPost(request, env) {
     "SELECT last_seen FROM status WHERE hostname = ?"
   ).bind(body.hostname).first();
 
-  // Upsert current status
+  // Upsert current status (reset alert_sent when server checks in)
   await env.status_monitor_db.prepare(`
-    INSERT INTO status (hostname, os, cpu_usage, memory_total, memory_used, disk_total, disk_used, uptime_seconds, last_seen)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO status (hostname, os, cpu_usage, memory_total, memory_used, disk_total, disk_used, uptime_seconds, last_seen, alert_sent)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     ON CONFLICT(hostname) DO UPDATE SET
       os = excluded.os,
       cpu_usage = excluded.cpu_usage,
@@ -67,7 +74,8 @@ async function handleStatusPost(request, env) {
       disk_total = excluded.disk_total,
       disk_used = excluded.disk_used,
       uptime_seconds = excluded.uptime_seconds,
-      last_seen = excluded.last_seen
+      last_seen = excluded.last_seen,
+      alert_sent = 0
   `).bind(
     body.hostname,
     body.os || "unknown",
@@ -220,6 +228,61 @@ function jsonResponse(data, status = 200) {
       "Access-Control-Allow-Origin": "*",
     },
   });
+}
+
+// --- Alerting ---
+
+async function checkAndAlert(env) {
+  // Find servers that are stale (>2 min) and haven't been alerted yet
+  const { results: staleServers } = await env.status_monitor_db.prepare(`
+    SELECT hostname, last_seen FROM status
+    WHERE alert_sent = 0
+      AND datetime(last_seen) < datetime('now', '-${DOWNTIME_THRESHOLD_S} seconds')
+  `).all();
+
+  for (const server of staleServers) {
+    const lastSeen = new Date(server.last_seen);
+    const downFor = Math.floor((Date.now() - lastSeen.getTime()) / 1000);
+
+    await sendAlertEmail(env, server.hostname, lastSeen, downFor);
+
+    await env.status_monitor_db.prepare(
+      "UPDATE status SET alert_sent = 1 WHERE hostname = ?"
+    ).bind(server.hostname).run();
+  }
+}
+
+async function sendAlertEmail(env, hostname, lastSeen, downForSeconds) {
+  const downStr = formatDuration(downForSeconds);
+  const subject = `[ALERT] ${hostname} is offline`;
+  const body = [
+    `Server ${hostname} has stopped reporting.`,
+    ``,
+    `Last seen: ${lastSeen.toISOString()}`,
+    `Down for: ${downStr}`,
+    ``,
+    `— Status Monitor`,
+  ].join("\n");
+
+  try {
+    const resp = await fetch("https://api.smtp2go.com/v3/email/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        api_key: env.SMTP2GO_API_KEY,
+        to: [ALERT_EMAIL],
+        sender: ALERT_FROM,
+        subject,
+        text_body: body,
+      }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      console.error(`SMTP2GO error for ${hostname}: ${resp.status} ${text}`);
+    }
+  } catch (err) {
+    console.error(`Failed to send alert for ${hostname}: ${err.message}`);
+  }
 }
 
 // --- Dashboard ---

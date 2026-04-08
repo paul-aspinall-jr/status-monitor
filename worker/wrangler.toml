@@ -2,7 +2,10 @@ name = "status"
 main = "src/index.js"
 compatibility_date = "2024-12-01"
 
-# API_KEY is set via `npx wrangler secret put API_KEY` — do not put it here
+# API_KEY and SMTP2GO_API_KEY are set via `npx wrangler secret put <NAME>`
+
+[triggers]
+crons = ["*/2 * * * *"]
 
 [[d1_databases]]
 binding = "status_monitor_db"
