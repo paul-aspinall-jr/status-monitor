@@ -1,4 +1,5 @@
-const DOWNTIME_THRESHOLD_S = 120; // gap > 2 minutes = downtime
+const DOWNTIME_THRESHOLD_S = 360; // gap > 6 minutes = downtime (covers ~5min restarts)
+const DOWNTIME_THRESHOLD_MS = DOWNTIME_THRESHOLD_S * 1000;
 
 const ALERT_FROM = "system.user@jackross.co.uk";
 
@@ -55,7 +56,7 @@ async function handleStatusPost(request, env) {
 
   // Get previous last_seen for downtime calculation
   const prev = await env.status_monitor_db.prepare(
-    "SELECT last_seen FROM status WHERE hostname = ?"
+    "SELECT last_seen, alert_sent FROM status WHERE hostname = ?"
   ).bind(body.hostname).first();
 
   // Upsert current status (reset alert_sent when server checks in)
@@ -107,6 +108,11 @@ async function handleStatusPost(request, env) {
     ON CONFLICT(hostname, date) DO UPDATE SET
       ping_count = daily_uptime.ping_count + 1
   `).bind(body.hostname, today).run();
+
+  // Send recovery email if a down-alert was previously sent for this server
+  if (prev?.alert_sent === 1 && prev?.last_seen) {
+    await sendRecoveryEmail(env, body.hostname, new Date(prev.last_seen), elapsedSinceLastPing);
+  }
 
   return jsonResponse({ ok: true, hostname: body.hostname });
 }
@@ -230,6 +236,25 @@ async function sendAlertEmail(env, hostname, lastSeen, downForSeconds) {
     `— Status Monitor`,
   ].join("\n");
 
+  await sendEmail(env, hostname, subject, body);
+}
+
+async function sendRecoveryEmail(env, hostname, lastSeen, downForSeconds) {
+  const downStr = formatDuration(downForSeconds);
+  const subject = `[RECOVERED] ${hostname} is back online`;
+  const body = [
+    `Server ${hostname} is reporting again.`,
+    ``,
+    `Last seen before outage: ${lastSeen.toISOString()}`,
+    `Down for: ${downStr}`,
+    ``,
+    `— Status Monitor`,
+  ].join("\n");
+
+  await sendEmail(env, hostname, subject, body);
+}
+
+async function sendEmail(env, hostname, subject, body) {
   try {
     const resp = await fetch("https://api.smtp2go.com/v3/email/send", {
       method: "POST",
@@ -247,7 +272,7 @@ async function sendAlertEmail(env, hostname, lastSeen, downForSeconds) {
       console.error(`SMTP2GO error for ${hostname}: ${resp.status} ${text}`);
     }
   } catch (err) {
-    console.error(`Failed to send alert for ${hostname}: ${err.message}`);
+    console.error(`Failed to send email for ${hostname}: ${err.message}`);
   }
 }
 
@@ -288,7 +313,7 @@ function renderDashboard(servers, uptimeByHost) {
   const serverSections = servers.map((s) => {
     const lastSeen = new Date(s.last_seen);
     const ageMs = Date.now() - lastSeen.getTime();
-    const isOnline = ageMs < 120_000;
+    const isOnline = ageMs < DOWNTIME_THRESHOLD_MS;
 
     const hostUptime = uptimeByHost[s.hostname] || [];
     const uptimeMap = {};
@@ -508,11 +533,11 @@ function renderDashboard(servers, uptimeByHost) {
 function renderOverallStatus(servers) {
   const allOnline = servers.every((s) => {
     const ageMs = Date.now() - new Date(s.last_seen).getTime();
-    return ageMs < 120_000;
+    return ageMs < DOWNTIME_THRESHOLD_MS;
   });
   const anyOnline = servers.some((s) => {
     const ageMs = Date.now() - new Date(s.last_seen).getTime();
-    return ageMs < 120_000;
+    return ageMs < DOWNTIME_THRESHOLD_MS;
   });
 
   let dotClass, text;
