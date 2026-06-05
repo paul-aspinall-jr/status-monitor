@@ -45,7 +45,13 @@ npx wrangler deploy
 
 ### 2. Build the Agent
 
-Requires [Zig](https://ziglang.org/download/) (tested with 0.15.x).
+Requires [Zig](https://ziglang.org/download/) 0.16.x.
+
+The agent embeds a Mozilla CA root bundle (`agent/src/ca_bundle.pem`) and trusts
+the union of it and the OS certificate store. This makes TLS validation
+independent of the Windows ROOT store cache, which is populated lazily and broke
+all Windows agents when Cloudflare rotated the workers.dev certificate chain
+(2026-06-05). Refresh the snapshot occasionally with `./build.sh ca-bundle`.
 
 ```bash
 # Build for current platform

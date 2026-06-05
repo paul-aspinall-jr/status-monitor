@@ -11,6 +11,7 @@ usage() {
     echo "  agent-linux    Build the status agent for Linux x86_64"
     echo "  agent-windows  Build the status agent for Windows x86_64"
     echo "  agent-all      Build the status agent for all platforms"
+    echo "  ca-bundle      Refresh the embedded CA root bundle from the system store"
     echo "  worker         Install worker dependencies"
     echo "  worker-dev     Run the worker locally (wrangler dev)"
     echo "  worker-deploy  Deploy the worker to Cloudflare"
@@ -39,6 +40,15 @@ case "${1:-}" in
         cd "$ROOT/agent" && zig build all
         echo "Outputs in agent/zig-out/bin/"
         ls -lh "$ROOT/agent/zig-out/bin/"
+        ;;
+    ca-bundle)
+        echo "Refreshing embedded CA root bundle from /etc/ssl/certs/ca-certificates.crt..."
+        {
+            echo "# Mozilla CA root bundle (via Ubuntu ca-certificates), snapshot $(date -u +%Y-%m-%d)."
+            echo "# Refresh with: ./build.sh ca-bundle"
+            cat /etc/ssl/certs/ca-certificates.crt
+        } > "$ROOT/agent/src/ca_bundle.pem"
+        echo "Output: agent/src/ca_bundle.pem ($(grep -c 'BEGIN CERTIFICATE' "$ROOT/agent/src/ca_bundle.pem") roots)"
         ;;
     worker)
         echo "Installing worker dependencies..."

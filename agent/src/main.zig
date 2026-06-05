@@ -1,5 +1,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const Io = std.Io;
+
+/// Mozilla CA root bundle snapshot, embedded at build time.
+///
+/// The agent trusts the union of this bundle and the OS certificate store.
+/// This exists because on Windows, Zig's TLS stack can only see roots already
+/// cached in the ROOT store and never triggers Windows' automatic root update.
+/// When Cloudflare rotated workers.dev onto a chain anchored at a root no box
+/// had cached, every Windows agent failed with TlsInitializationFailed
+/// (2026-06-05 outage). Refresh with: ./build.sh ca-bundle
+const embedded_ca_pem = @embedFile("ca_bundle.pem");
 
 const Config = struct {
     endpoint: []const u8,
@@ -19,13 +30,12 @@ const SystemMetrics = struct {
     uptime_seconds: ?u64,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const config = loadConfig(allocator) catch |err| {
-        std.log.err("Failed to load config: {}", .{err});
+    const config = loadConfig(init.arena.allocator(), io, init.environ_map) catch |err| {
+        std.log.err("Failed to load config: {t}", .{err});
         std.log.err("Set STATUS_ENDPOINT and STATUS_API_KEY environment variables, or create config.ini", .{});
         return err;
     };
@@ -35,60 +45,48 @@ pub fn main() !void {
     std.log.info("  interval: {}s", .{config.interval_seconds});
 
     while (true) {
-        const metrics = collectMetrics(allocator, config) catch |err| {
-            std.log.err("Failed to collect metrics: {}", .{err});
-            std.Thread.sleep(config.interval_seconds * std.time.ns_per_s);
-            continue;
-        };
+        var tick_arena = std.heap.ArenaAllocator.init(allocator);
+        defer tick_arena.deinit();
 
-        sendMetrics(allocator, config, metrics) catch |err| {
-            std.log.err("Failed to send metrics: {}", .{err});
-        };
+        if (collectMetrics(tick_arena.allocator(), io, config, init.environ_map)) |metrics| {
+            sendMetrics(allocator, io, config, metrics) catch |err| {
+                std.log.err("Failed to send metrics: {t}", .{err});
+            };
+        } else |err| {
+            std.log.err("Failed to collect metrics: {t}", .{err});
+        }
 
-        std.Thread.sleep(config.interval_seconds * std.time.ns_per_s);
+        io.sleep(.fromSeconds(@intCast(config.interval_seconds)), .awake) catch {};
     }
 }
 
 // --- Config loading ---
 
-fn loadConfig(allocator: std.mem.Allocator) !Config {
-    const endpoint = getEnv(allocator, "STATUS_ENDPOINT");
-    const api_key = getEnv(allocator, "STATUS_API_KEY");
-    const interval_str = getEnv(allocator, "STATUS_INTERVAL");
-    const hostname_override = getEnv(allocator, "STATUS_HOSTNAME");
+fn loadConfig(arena: std.mem.Allocator, io: Io, environ: *std.process.Environ.Map) !Config {
+    const endpoint = environ.get("STATUS_ENDPOINT");
+    const api_key = environ.get("STATUS_API_KEY");
 
     if (endpoint != null and api_key != null) {
-        const interval: u64 = if (interval_str) |s| std.fmt.parseInt(u64, s, 10) catch 60 else 60;
-        if (interval_str) |s| allocator.free(s);
+        const interval: u64 = if (environ.get("STATUS_INTERVAL")) |s|
+            std.fmt.parseInt(u64, s, 10) catch 60
+        else
+            60;
         return Config{
-            .endpoint = endpoint.?,
-            .api_key = api_key.?,
+            .endpoint = try arena.dupe(u8, endpoint.?),
+            .api_key = try arena.dupe(u8, api_key.?),
             .interval_seconds = interval,
-            .hostname_override = hostname_override,
+            .hostname_override = if (environ.get("STATUS_HOSTNAME")) |h| try arena.dupe(u8, h) else null,
         };
     }
 
-    if (endpoint) |e| allocator.free(e);
-    if (api_key) |k| allocator.free(k);
-    if (interval_str) |s| allocator.free(s);
-    if (hostname_override) |h| allocator.free(h);
-
-    return loadConfigFile(allocator);
+    return loadConfigFile(arena, io);
 }
 
-fn getEnv(allocator: std.mem.Allocator, key: []const u8) ?[]const u8 {
-    return std.process.getEnvVarOwned(allocator, key) catch return null;
-}
-
-fn loadConfigFile(allocator: std.mem.Allocator) !Config {
-    const file = std.fs.cwd().openFile("config.ini", .{}) catch {
+fn loadConfigFile(arena: std.mem.Allocator, io: Io) !Config {
+    var buf: [8192]u8 = undefined;
+    const content = Io.Dir.cwd().readFile(io, "config.ini", &buf) catch {
         return error.ConfigNotFound;
     };
-    defer file.close();
-
-    var buf: [8192]u8 = undefined;
-    const bytes_read = file.readAll(&buf) catch return error.ConfigNotFound;
-    const content = buf[0..bytes_read];
 
     var endpoint: ?[]const u8 = null;
     var api_key: ?[]const u8 = null;
@@ -97,7 +95,7 @@ fn loadConfigFile(allocator: std.mem.Allocator) !Config {
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line_raw| {
-        const line = std.mem.trimRight(u8, line_raw, &[_]u8{ '\r', ' ', '\t' });
+        const line = std.mem.trimEnd(u8, line_raw, &[_]u8{ '\r', ' ', '\t' });
         if (line.len == 0 or line[0] == '#' or line[0] == ';') continue;
 
         if (std.mem.indexOf(u8, line, "=")) |eq_idx| {
@@ -105,13 +103,13 @@ fn loadConfigFile(allocator: std.mem.Allocator) !Config {
             const val = std.mem.trim(u8, line[eq_idx + 1 ..], &[_]u8{ ' ', '\t' });
 
             if (std.mem.eql(u8, key, "endpoint")) {
-                endpoint = try allocator.dupe(u8, val);
+                endpoint = try arena.dupe(u8, val);
             } else if (std.mem.eql(u8, key, "api_key")) {
-                api_key = try allocator.dupe(u8, val);
+                api_key = try arena.dupe(u8, val);
             } else if (std.mem.eql(u8, key, "interval")) {
                 interval = std.fmt.parseInt(u64, val, 10) catch 60;
             } else if (std.mem.eql(u8, key, "hostname")) {
-                hostname_override = try allocator.dupe(u8, val);
+                hostname_override = try arena.dupe(u8, val);
             }
         }
     }
@@ -130,8 +128,8 @@ fn loadConfigFile(allocator: std.mem.Allocator) !Config {
 
 // --- Metrics collection ---
 
-fn collectMetrics(allocator: std.mem.Allocator, config: Config) !SystemMetrics {
-    const hostname = config.hostname_override orelse try getHostname(allocator);
+fn collectMetrics(arena: std.mem.Allocator, io: Io, config: Config, environ: *std.process.Environ.Map) !SystemMetrics {
+    const hostname = config.hostname_override orelse try getHostname(arena, environ);
     const os_name = getOsName();
 
     var metrics = SystemMetrics{
@@ -146,9 +144,9 @@ fn collectMetrics(allocator: std.mem.Allocator, config: Config) !SystemMetrics {
     };
 
     if (comptime builtin.os.tag == .linux) {
-        metrics.memory_total, metrics.memory_used = readLinuxMemory() catch .{ null, null };
-        metrics.cpu_usage = readLinuxCpuUsage() catch null;
-        metrics.uptime_seconds = readLinuxUptime() catch null;
+        metrics.memory_total, metrics.memory_used = readLinuxMemory(io) catch .{ null, null };
+        metrics.cpu_usage = readLinuxCpuUsage(io) catch null;
+        metrics.uptime_seconds = readLinuxUptime(io) catch null;
         metrics.disk_total, metrics.disk_used = readLinuxDisk() catch .{ null, null };
     } else if (comptime builtin.os.tag == .windows) {
         metrics.memory_total, metrics.memory_used = readWindowsMemory();
@@ -158,15 +156,14 @@ fn collectMetrics(allocator: std.mem.Allocator, config: Config) !SystemMetrics {
     return metrics;
 }
 
-fn getHostname(allocator: std.mem.Allocator) ![]const u8 {
+fn getHostname(arena: std.mem.Allocator, environ: *std.process.Environ.Map) ![]const u8 {
     if (comptime builtin.os.tag == .windows) {
-        return std.process.getEnvVarOwned(allocator, "COMPUTERNAME") catch {
-            return try allocator.dupe(u8, "unknown-windows");
-        };
+        const name = environ.get("COMPUTERNAME") orelse "unknown-windows";
+        return try arena.dupe(u8, name);
     } else {
         var buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
         const hostname = try std.posix.gethostname(&buf);
-        return try allocator.dupe(u8, hostname);
+        return try arena.dupe(u8, hostname);
     }
 }
 
@@ -181,16 +178,13 @@ fn getOsName() []const u8 {
 
 // --- Linux metrics ---
 
-fn readFileContents(path: []const u8, buf: []u8) ![]const u8 {
-    const file = try std.fs.openFileAbsolute(path, .{});
-    defer file.close();
-    const n = file.readAll(buf) catch return error.ReadFailed;
-    return buf[0..n];
+fn readFileContents(io: Io, path: []const u8, buf: []u8) ![]const u8 {
+    return Io.Dir.cwd().readFile(io, path, buf) catch return error.ReadFailed;
 }
 
-fn readLinuxMemory() !struct { ?u64, ?u64 } {
+fn readLinuxMemory(io: Io) !struct { ?u64, ?u64 } {
     var buf: [4096]u8 = undefined;
-    const content = try readFileContents("/proc/meminfo", &buf);
+    const content = try readFileContents(io, "/proc/meminfo", &buf);
 
     var total: ?u64 = null;
     var available: ?u64 = null;
@@ -219,10 +213,10 @@ fn parseMemInfoValue(line: []const u8) ?u64 {
     return val * 1024; // convert kB to bytes
 }
 
-fn readLinuxCpuUsage() !?f64 {
-    const sample1 = try readCpuSample();
-    std.Thread.sleep(1 * std.time.ns_per_s);
-    const sample2 = try readCpuSample();
+fn readLinuxCpuUsage(io: Io) !?f64 {
+    const sample1 = try readCpuSample(io);
+    io.sleep(.fromSeconds(1), .awake) catch {};
+    const sample2 = try readCpuSample(io);
 
     const total_diff = sample2.total - sample1.total;
     const idle_diff = sample2.idle - sample1.idle;
@@ -233,9 +227,9 @@ fn readLinuxCpuUsage() !?f64 {
 
 const CpuSample = struct { total: u64, idle: u64 };
 
-fn readCpuSample() !CpuSample {
+fn readCpuSample(io: Io) !CpuSample {
     var buf: [512]u8 = undefined;
-    const content = try readFileContents("/proc/stat", &buf);
+    const content = try readFileContents(io, "/proc/stat", &buf);
 
     // Get just the first line
     const nl = std.mem.indexOf(u8, content, "\n") orelse content.len;
@@ -261,9 +255,9 @@ fn readCpuSample() !CpuSample {
     return CpuSample{ .total = total, .idle = idle };
 }
 
-fn readLinuxUptime() !?u64 {
+fn readLinuxUptime(io: Io) !?u64 {
     var buf: [64]u8 = undefined;
-    const content = try readFileContents("/proc/uptime", &buf);
+    const content = try readFileContents(io, "/proc/uptime", &buf);
 
     const space_idx = std.mem.indexOf(u8, content, " ") orelse content.len;
     const dot_idx = std.mem.indexOf(u8, content[0..space_idx], ".") orelse space_idx;
@@ -327,42 +321,94 @@ fn readWindowsUptime() ?u64 {
     return GetTickCount64() / 1000;
 }
 
+// --- TLS trust setup ---
+
+/// Populate the client's CA bundle with the union of the OS certificate
+/// store and the embedded Mozilla bundle. Either source may fail or be
+/// incomplete (e.g. a sparse Windows ROOT store cache); the other still
+/// provides trust anchors.
+fn setupTrust(client: *std.http.Client, allocator: std.mem.Allocator, io: Io) !void {
+    const now = Io.Clock.real.now(io);
+    // Non-null `now` tells std.http.Client not to do its own rescan,
+    // which would replace the bundle assembled here.
+    client.now = now;
+
+    client.ca_bundle.rescan(allocator, io, now) catch |err| {
+        std.log.warn("OS certificate store scan failed ({t}); using embedded roots only", .{err});
+    };
+    try addCertsFromPem(&client.ca_bundle, allocator, embedded_ca_pem, now.toSeconds());
+}
+
+/// Add certificates from an in-memory PEM bundle, mirroring
+/// std.crypto.Certificate.Bundle.addCertsFromFile. Certificates that are
+/// expired or fail to parse are skipped rather than aborting the load.
+fn addCertsFromPem(
+    bundle: *std.crypto.Certificate.Bundle,
+    gpa: std.mem.Allocator,
+    pem: []const u8,
+    now_sec: i64,
+) !void {
+    const begin_marker = "-----BEGIN CERTIFICATE-----";
+    const end_marker = "-----END CERTIFICATE-----";
+    const base64 = std.base64.standard.decoderWithIgnore(" \t\r\n");
+
+    var start_index: usize = 0;
+    while (std.mem.indexOfPos(u8, pem, start_index, begin_marker)) |begin_marker_start| {
+        const cert_start = begin_marker_start + begin_marker.len;
+        const cert_end = std.mem.indexOfPos(u8, pem, cert_start, end_marker) orelse
+            return error.MissingEndCertificateMarker;
+        start_index = cert_end + end_marker.len;
+
+        const encoded = std.mem.trim(u8, pem[cert_start..cert_end], " \t\r\n");
+        const decoded_start: u32 = @intCast(bundle.bytes.items.len);
+        try bundle.bytes.ensureUnusedCapacity(gpa, base64.calcSizeUpperBound(encoded.len));
+        const dest = bundle.bytes.allocatedSlice()[decoded_start..];
+        const decoded_len = base64.decode(dest, encoded) catch continue;
+        bundle.bytes.items.len += decoded_len;
+        bundle.parseCert(gpa, decoded_start, now_sec) catch {
+            bundle.bytes.items.len = decoded_start;
+        };
+    }
+}
+
 // --- HTTP sender ---
 
-fn sendMetrics(allocator: std.mem.Allocator, config: Config, metrics: SystemMetrics) !void {
-    var json_buf: std.ArrayList(u8) = .{};
-    defer json_buf.deinit(allocator);
+fn sendMetrics(allocator: std.mem.Allocator, io: Io, config: Config, metrics: SystemMetrics) !void {
+    var json_buf: Io.Writer.Allocating = .init(allocator);
+    defer json_buf.deinit();
 
-    const writer = json_buf.writer(allocator);
+    const writer = &json_buf.writer;
     try writer.writeAll("{");
-    try std.fmt.format(writer, "\"hostname\":\"{s}\",\"os\":\"{s}\"", .{ metrics.hostname, metrics.os });
+    try writer.print("\"hostname\":\"{s}\",\"os\":\"{s}\"", .{ metrics.hostname, metrics.os });
 
     if (metrics.cpu_usage) |v| {
-        try std.fmt.format(writer, ",\"cpu_usage\":{d:.1}", .{v});
+        try writer.print(",\"cpu_usage\":{d:.1}", .{v});
     }
     if (metrics.memory_total) |v| {
-        try std.fmt.format(writer, ",\"memory_total\":{}", .{v});
+        try writer.print(",\"memory_total\":{}", .{v});
     }
     if (metrics.memory_used) |v| {
-        try std.fmt.format(writer, ",\"memory_used\":{}", .{v});
+        try writer.print(",\"memory_used\":{}", .{v});
     }
     if (metrics.disk_total) |v| {
-        try std.fmt.format(writer, ",\"disk_total\":{}", .{v});
+        try writer.print(",\"disk_total\":{}", .{v});
     }
     if (metrics.disk_used) |v| {
-        try std.fmt.format(writer, ",\"disk_used\":{}", .{v});
+        try writer.print(",\"disk_used\":{}", .{v});
     }
     if (metrics.uptime_seconds) |v| {
-        try std.fmt.format(writer, ",\"uptime_seconds\":{}", .{v});
+        try writer.print(",\"uptime_seconds\":{}", .{v});
     }
 
     try writer.writeAll("}");
 
-    const payload = json_buf.items;
+    const payload = json_buf.written();
     std.log.info("Sending: {s}", .{payload});
 
-    var client = std.http.Client{ .allocator = allocator };
+    var client = std.http.Client{ .allocator = allocator, .io = io };
     defer client.deinit();
+
+    try setupTrust(&client, allocator, io);
 
     const uri = std.Uri.parse(config.endpoint) catch {
         std.log.err("Invalid endpoint URL: {s}", .{config.endpoint});
@@ -377,7 +423,7 @@ fn sendMetrics(allocator: std.mem.Allocator, config: Config, metrics: SystemMetr
     });
     defer req.deinit();
 
-    try req.sendBodyComplete(@constCast(payload));
+    try req.sendBodyComplete(payload);
     var redirect_buf: [4096]u8 = undefined;
     const response = try req.receiveHead(&redirect_buf);
 
@@ -386,4 +432,18 @@ fn sendMetrics(allocator: std.mem.Allocator, config: Config, metrics: SystemMetr
     } else {
         std.log.err("Server returned HTTP {}", .{@intFromEnum(response.head.status)});
     }
+}
+
+test "embedded CA bundle parses and contains current roots" {
+    const gpa = std.testing.allocator;
+    var bundle: std.crypto.Certificate.Bundle = .empty;
+    defer bundle.deinit(gpa);
+
+    // Use a fixed timestamp (2026-06-01) so the test does not depend on wall
+    // clock; parseCert drops certificates expired relative to `now`.
+    const now_sec: i64 = 1780272000;
+    try addCertsFromPem(&bundle, gpa, embedded_ca_pem, now_sec);
+
+    // The Mozilla bundle carries well over 100 roots.
+    try std.testing.expect(bundle.map.count() > 100);
 }

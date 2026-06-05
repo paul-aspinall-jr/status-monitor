@@ -5,15 +5,21 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     // Native build
+    const native_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = native_target,
+        .optimize = optimize,
+    });
     const native_exe = b.addExecutable(.{
         .name = "status-agent",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = native_target,
-            .optimize = optimize,
-        }),
+        .root_module = native_module,
     });
     b.installArtifact(native_exe);
+
+    // Unit tests
+    const unit_tests = b.addTest(.{ .root_module = native_module });
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&b.addRunArtifact(unit_tests).step);
 
     // Run step (for development)
     const run_cmd = b.addRunArtifact(native_exe);
